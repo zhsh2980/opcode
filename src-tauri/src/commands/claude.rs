@@ -12,6 +12,8 @@ use tokio::sync::Mutex;
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandEvent;
 use regex;
+use crate::checkpoint::commands::CheckpointState;
+use serde_json::json;
 
 /// Global state to track current Claude process
 pub struct ClaudeProcessState {
@@ -1205,6 +1207,9 @@ async fn spawn_claude_process(app: AppHandle, mut cmd: Command, prompt: String, 
     let stdout_reader = BufReader::new(stdout);
     let stderr_reader = BufReader::new(stderr);
 
+    // Initialize a message counter for checkpoint indexing
+    let message_counter = Arc::new(Mutex::new(0usize));
+
     // We'll extract the session ID from Claude's init message
     let session_id_holder: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let run_id_holder: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
@@ -1230,53 +1235,106 @@ async fn spawn_claude_process(app: AppHandle, mut cmd: Command, prompt: String, 
     let project_path_clone = project_path.clone();
     let prompt_clone = prompt.clone();
     let model_clone = model.clone();
-    let stdout_task = tokio::spawn(async move {
-        let mut lines = stdout_reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            log::debug!("Claude stdout: {}", line);
-            
-            // Parse the line to check for init message with session ID
-            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-                if msg["type"] == "system" && msg["subtype"] == "init" {
-                    if let Some(claude_session_id) = msg["session_id"].as_str() {
-                        let mut session_id_guard = session_id_holder_clone.lock().unwrap();
-                        if session_id_guard.is_none() {
-                            *session_id_guard = Some(claude_session_id.to_string());
-                            log::info!("Extracted Claude session ID: {}", claude_session_id);
-                            
-                            // Now register with ProcessRegistry using Claude's session ID
-                            match registry_clone.register_claude_session(
-                                claude_session_id.to_string(),
-                                pid,
-                                project_path_clone.clone(),
-                                prompt_clone.clone(),
-                                model_clone.clone(),
-                            ) {
-                                Ok(run_id) => {
-                                    log::info!("Registered Claude session with run_id: {}", run_id);
-                                    let mut run_id_guard = run_id_holder_clone.lock().unwrap();
-                                    *run_id_guard = Some(run_id);
+    let message_counter_clone = message_counter.clone();
+    
+    // Wrap the stdout_task to capture message_counter and checkpoint state
+    let stdout_task = tokio::spawn({
+        let app_handle = app_handle.clone();
+        let session_id_holder = session_id_holder_clone.clone();
+        let run_id_holder = run_id_holder_clone.clone();
+        let registry_clone = registry_clone.clone();
+        let project_path_clone = project_path_clone.clone();
+        let prompt_clone = prompt_clone.clone();
+        let model_clone = model_clone.clone();
+        let message_counter = message_counter_clone.clone();
+        async move {
+            let mut lines = stdout_reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                log::debug!("Claude stdout: {}", line);
+
+                // Increment and retrieve message index
+                let idx = {
+                    let mut guard = message_counter.lock().unwrap();
+                    let idx = *guard;
+                    *guard += 1;
+                    idx
+                };
+
+
+                
+                // Parse and register session once
+                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if msg["type"] == "system" && msg["subtype"] == "init" {
+                        if let Some(claude_session_id) = msg["session_id"].as_str() {
+                            let should_init = {
+                                let mut sid_guard = session_id_holder.lock().unwrap();
+                                if sid_guard.is_none() {
+                                    *sid_guard = Some(claude_session_id.to_string());
+                                    true
+                                } else {
+                                    false
                                 }
-                                Err(e) => {
-                                    log::error!("Failed to register Claude session: {}", e);
+                            };
+                            
+                            if should_init {
+                                log::info!("Extracted Claude session ID: {}", claude_session_id);
+                                // Register with ProcessRegistry
+                                if let Ok(run_id) = registry_clone.register_claude_session(
+                                    claude_session_id.to_string(), pid,
+                                    project_path_clone.clone(), prompt_clone.clone(), model_clone.clone()
+                                ) {
+                                    log::info!("Registered Claude session with run_id: {}", run_id);
+                                    let mut run_guard = run_id_holder.lock().unwrap();
+                                    *run_guard = Some(run_id);
+                                }
+                                // Initialize Titor for this session
+                                if let Ok(manager) = app_handle.state::<CheckpointState>()
+                                    .get_or_create_manager(PathBuf::from(project_path_clone.clone()), claude_session_id.to_string())
+                                    .await
+                                {
+                                    if let Err(e) = manager.checkpoint_message(idx, "Session initialized").await {
+                                        log::error!("Failed to create initial checkpoint: {:?}", e);
+                                    }
                                 }
                             }
                         }
                     }
                 }
+
+                // Store and emit live output
+                if let Some(run_id) = *run_id_holder.lock().unwrap() {
+                    let _ = registry_clone.append_live_output(run_id, &line);
+                }
+                if let Some(ref sid) = *session_id_holder.lock().unwrap() {
+                    let _ = app_handle.emit(&format!("claude-output:{}", sid), &line);
+                }
+                let _ = app_handle.emit("claude-output", &line);
+
+                // Automatically checkpoint every entry
+                let sid_clone = session_id_holder.lock().unwrap().clone();
+                if let Some(sid) = sid_clone {
+                    if let Ok(manager) = app_handle.state::<CheckpointState>()
+                        .get_or_create_manager(PathBuf::from(project_path_clone.clone()), sid.clone())
+                        .await
+                    {
+                        let desc = if line.len() > 100 {
+                            format!("{}...", &line[..100])
+                        } else {
+                            line.clone()
+                        };
+                        if let Ok(checkpoint_id) = manager.checkpoint_message(idx, &desc).await {
+                            // Emit checkpoint created event
+                            let _ = app_handle.emit(
+                                &format!("checkpoint-created:{}", sid),
+                                json!({
+                                    "checkpointId": checkpoint_id,
+                                    "messageIndex": idx
+                                })
+                            );
+                        }
+                    }
+                }
             }
-            
-            // Store live output in registry if we have a run_id
-            if let Some(run_id) = *run_id_holder_clone.lock().unwrap() {
-                let _ = registry_clone.append_live_output(run_id, &line);
-            }
-            
-            // Emit the line to the frontend with session isolation if we have session ID
-            if let Some(ref session_id) = *session_id_holder_clone.lock().unwrap() {
-                let _ = app_handle.emit(&format!("claude-output:{}", session_id), &line);
-            }
-            // Also emit to the generic event for backward compatibility
-            let _ = app_handle.emit("claude-output", &line);
         }
     });
 
@@ -1340,6 +1398,8 @@ async fn spawn_claude_process(app: AppHandle, mut cmd: Command, prompt: String, 
         if let Some(run_id) = *run_id_holder_clone2.lock().unwrap() {
             let _ = registry_clone2.unregister_process(run_id);
         }
+        
+
 
         // Clear the process from state
         *current_process = None;
@@ -1373,6 +1433,9 @@ async fn spawn_claude_sidecar(
     // We'll extract the session ID from Claude's init message
     let session_id_holder: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let run_id_holder: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
+    
+    // Initialize a message counter for checkpoint indexing
+    let message_counter = Arc::new(tokio::sync::Mutex::new(0usize));
 
     // Register with ProcessRegistry
     let registry = app.state::<crate::process::ProcessRegistryState>();
@@ -1385,6 +1448,7 @@ async fn spawn_claude_sidecar(
     let app_handle = app.clone();
     let session_id_holder_clone = session_id_holder.clone();
     let run_id_holder_clone = run_id_holder.clone();
+    let message_counter_clone = message_counter.clone();
     
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
@@ -1396,13 +1460,31 @@ async fn spawn_claude_sidecar(
                     if !line_str.is_empty() {
                         log::debug!("Claude sidecar stdout: {}", line_str);
                         
+                        // Increment and retrieve message index
+                        let idx = {
+                            let mut guard = message_counter_clone.lock().await;
+                            let idx = *guard;
+                            *guard += 1;
+                            idx
+                        };
+                        
+
+                        
                         // Parse the line to check for init message with session ID
                         if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line_str) {
                             if msg["type"] == "system" && msg["subtype"] == "init" {
                                 if let Some(claude_session_id) = msg["session_id"].as_str() {
-                                    let mut session_id_guard = session_id_holder_clone.lock().unwrap();
-                                    if session_id_guard.is_none() {
-                                        *session_id_guard = Some(claude_session_id.to_string());
+                                    let should_init = {
+                                        let mut session_id_guard = session_id_holder_clone.lock().unwrap();
+                                        if session_id_guard.is_none() {
+                                            *session_id_guard = Some(claude_session_id.to_string());
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    
+                                    if should_init {
                                         log::info!("Extracted Claude session ID: {}", claude_session_id);
                                         
                                         // Register with ProcessRegistry using Claude's session ID
@@ -1422,6 +1504,17 @@ async fn spawn_claude_sidecar(
                                                 log::error!("Failed to register Claude sidecar session: {}", e);
                                             }
                                         }
+                                        
+                                        // Initialize Titor for this session
+                                        let manager_result = app_handle.state::<CheckpointState>()
+                                            .get_or_create_manager(PathBuf::from(project_path_clone.clone()), claude_session_id.to_string())
+                                            .await;
+                                        
+                                        if let Ok(manager) = manager_result {
+                                            if let Err(e) = manager.checkpoint_message(idx, "Session initialized").await {
+                                                log::error!("Failed to create initial checkpoint: {:?}", e);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1438,6 +1531,31 @@ async fn spawn_claude_sidecar(
                         }
                         // Also emit to the generic event for backward compatibility
                         let _ = app_handle.emit("claude-output", line_str);
+                        
+                        // Automatically checkpoint every entry
+                        let sid_clone = session_id_holder_clone.lock().unwrap().clone();
+                        if let Some(sid) = sid_clone {
+                            if let Ok(manager) = app_handle.state::<CheckpointState>()
+                                .get_or_create_manager(PathBuf::from(project_path_clone.clone()), sid.clone())
+                                .await
+                            {
+                                let desc = if line_str.len() > 100 {
+                                    format!("{}...", &line_str[..100])
+                                } else {
+                                    line_str.to_string()
+                                };
+                                if let Ok(checkpoint_id) = manager.checkpoint_message(idx, &desc).await {
+                                    // Emit checkpoint created event
+                                    let _ = app_handle.emit(
+                                        &format!("checkpoint-created:{}", sid),
+                                        json!({
+                                            "checkpointId": checkpoint_id,
+                                            "messageIndex": idx
+                                        })
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 CommandEvent::Stderr(line_bytes) => {
@@ -1473,6 +1591,8 @@ async fn spawn_claude_sidecar(
                     if let Some(run_id) = *run_id_holder_clone.lock().unwrap() {
                         let _ = registry_clone.unregister_process(run_id);
                     }
+                    
+
                     
                     break;
                 }
@@ -1676,526 +1796,6 @@ fn search_files_recursive(
 
             search_files_recursive(&entry_path, base_path, query, results, depth + 1)?;
         }
-    }
-
-    Ok(())
-}
-
-/// Creates a checkpoint for the current session state
-#[tauri::command]
-pub async fn create_checkpoint(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-    message_index: Option<usize>,
-    description: Option<String>,
-) -> Result<crate::checkpoint::CheckpointResult, String> {
-    log::info!(
-        "Creating checkpoint for session: {} in project: {}",
-        session_id,
-        project_id
-    );
-
-    let manager = app
-        .get_or_create_manager(
-            session_id.clone(),
-            project_id.clone(),
-            PathBuf::from(&project_path),
-        )
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    // Always load current session messages from the JSONL file
-    let session_path = get_claude_dir()
-        .map_err(|e| e.to_string())?
-        .join("projects")
-        .join(&project_id)
-        .join(format!("{}.jsonl", session_id));
-
-    if session_path.exists() {
-        let file = fs::File::open(&session_path)
-            .map_err(|e| format!("Failed to open session file: {}", e))?;
-        let reader = BufReader::new(file);
-
-        let mut line_count = 0;
-        for line in reader.lines() {
-            if let Some(index) = message_index {
-                if line_count > index {
-                    break;
-                }
-            }
-            if let Ok(line) = line {
-                manager
-                    .track_message(line)
-                    .await
-                    .map_err(|e| format!("Failed to track message: {}", e))?;
-            }
-            line_count += 1;
-        }
-    }
-
-    manager
-        .create_checkpoint(description, None)
-        .await
-        .map_err(|e| format!("Failed to create checkpoint: {}", e))
-}
-
-/// Restores a session to a specific checkpoint
-#[tauri::command]
-pub async fn restore_checkpoint(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    checkpoint_id: String,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-) -> Result<crate::checkpoint::CheckpointResult, String> {
-    log::info!(
-        "Restoring checkpoint: {} for session: {}",
-        checkpoint_id,
-        session_id
-    );
-
-    let manager = app
-        .get_or_create_manager(
-            session_id.clone(),
-            project_id.clone(),
-            PathBuf::from(&project_path),
-        )
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    let result = manager
-        .restore_checkpoint(&checkpoint_id)
-        .await
-        .map_err(|e| format!("Failed to restore checkpoint: {}", e))?;
-
-    // Update the session JSONL file with restored messages
-    let claude_dir = get_claude_dir().map_err(|e| e.to_string())?;
-    let session_path = claude_dir
-        .join("projects")
-        .join(&result.checkpoint.project_id)
-        .join(format!("{}.jsonl", session_id));
-
-    // The manager has already restored the messages internally,
-    // but we need to update the actual session file
-    let (_, _, messages) = manager
-        .storage
-        .load_checkpoint(&result.checkpoint.project_id, &session_id, &checkpoint_id)
-        .map_err(|e| format!("Failed to load checkpoint data: {}", e))?;
-
-    fs::write(&session_path, messages)
-        .map_err(|e| format!("Failed to update session file: {}", e))?;
-
-    Ok(result)
-}
-
-/// Lists all checkpoints for a session
-#[tauri::command]
-pub async fn list_checkpoints(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-) -> Result<Vec<crate::checkpoint::Checkpoint>, String> {
-    log::info!(
-        "Listing checkpoints for session: {} in project: {}",
-        session_id,
-        project_id
-    );
-
-    let manager = app
-        .get_or_create_manager(session_id, project_id, PathBuf::from(&project_path))
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    Ok(manager.list_checkpoints().await)
-}
-
-/// Forks a new timeline branch from a checkpoint
-#[tauri::command]
-pub async fn fork_from_checkpoint(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    checkpoint_id: String,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-    new_session_id: String,
-    description: Option<String>,
-) -> Result<crate::checkpoint::CheckpointResult, String> {
-    log::info!(
-        "Forking from checkpoint: {} to new session: {}",
-        checkpoint_id,
-        new_session_id
-    );
-
-    let claude_dir = get_claude_dir().map_err(|e| e.to_string())?;
-
-    // First, copy the session file to the new session
-    let source_session_path = claude_dir
-        .join("projects")
-        .join(&project_id)
-        .join(format!("{}.jsonl", session_id));
-    let new_session_path = claude_dir
-        .join("projects")
-        .join(&project_id)
-        .join(format!("{}.jsonl", new_session_id));
-
-    if source_session_path.exists() {
-        fs::copy(&source_session_path, &new_session_path)
-            .map_err(|e| format!("Failed to copy session file: {}", e))?;
-    }
-
-    // Create manager for the new session
-    let manager = app
-        .get_or_create_manager(
-            new_session_id.clone(),
-            project_id,
-            PathBuf::from(&project_path),
-        )
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    manager
-        .fork_from_checkpoint(&checkpoint_id, description)
-        .await
-        .map_err(|e| format!("Failed to fork checkpoint: {}", e))
-}
-
-/// Gets the timeline for a session
-#[tauri::command]
-pub async fn get_session_timeline(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-) -> Result<crate::checkpoint::SessionTimeline, String> {
-    log::info!(
-        "Getting timeline for session: {} in project: {}",
-        session_id,
-        project_id
-    );
-
-    let manager = app
-        .get_or_create_manager(session_id, project_id, PathBuf::from(&project_path))
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    Ok(manager.get_timeline().await)
-}
-
-/// Updates checkpoint settings for a session
-#[tauri::command]
-pub async fn update_checkpoint_settings(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-    auto_checkpoint_enabled: bool,
-    checkpoint_strategy: String,
-) -> Result<(), String> {
-    use crate::checkpoint::CheckpointStrategy;
-
-    log::info!("Updating checkpoint settings for session: {}", session_id);
-
-    let strategy = match checkpoint_strategy.as_str() {
-        "manual" => CheckpointStrategy::Manual,
-        "per_prompt" => CheckpointStrategy::PerPrompt,
-        "per_tool_use" => CheckpointStrategy::PerToolUse,
-        "smart" => CheckpointStrategy::Smart,
-        _ => {
-            return Err(format!(
-                "Invalid checkpoint strategy: {}",
-                checkpoint_strategy
-            ))
-        }
-    };
-
-    let manager = app
-        .get_or_create_manager(session_id, project_id, PathBuf::from(&project_path))
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    manager
-        .update_settings(auto_checkpoint_enabled, strategy)
-        .await
-        .map_err(|e| format!("Failed to update settings: {}", e))
-}
-
-/// Gets diff between two checkpoints
-#[tauri::command]
-pub async fn get_checkpoint_diff(
-    from_checkpoint_id: String,
-    to_checkpoint_id: String,
-    session_id: String,
-    project_id: String,
-) -> Result<crate::checkpoint::CheckpointDiff, String> {
-    use crate::checkpoint::storage::CheckpointStorage;
-
-    log::info!(
-        "Getting diff between checkpoints: {} -> {}",
-        from_checkpoint_id,
-        to_checkpoint_id
-    );
-
-    let claude_dir = get_claude_dir().map_err(|e| e.to_string())?;
-    let storage = CheckpointStorage::new(claude_dir);
-
-    // Load both checkpoints
-    let (from_checkpoint, from_files, _) = storage
-        .load_checkpoint(&project_id, &session_id, &from_checkpoint_id)
-        .map_err(|e| format!("Failed to load source checkpoint: {}", e))?;
-    let (to_checkpoint, to_files, _) = storage
-        .load_checkpoint(&project_id, &session_id, &to_checkpoint_id)
-        .map_err(|e| format!("Failed to load target checkpoint: {}", e))?;
-
-    // Build file maps
-    let mut from_map: std::collections::HashMap<PathBuf, &crate::checkpoint::FileSnapshot> =
-        std::collections::HashMap::new();
-    for file in &from_files {
-        from_map.insert(file.file_path.clone(), file);
-    }
-
-    let mut to_map: std::collections::HashMap<PathBuf, &crate::checkpoint::FileSnapshot> =
-        std::collections::HashMap::new();
-    for file in &to_files {
-        to_map.insert(file.file_path.clone(), file);
-    }
-
-    // Calculate differences
-    let mut modified_files = Vec::new();
-    let mut added_files = Vec::new();
-    let mut deleted_files = Vec::new();
-
-    // Check for modified and deleted files
-    for (path, from_file) in &from_map {
-        if let Some(to_file) = to_map.get(path) {
-            if from_file.hash != to_file.hash {
-                // File was modified
-                let additions = to_file.content.lines().count();
-                let deletions = from_file.content.lines().count();
-
-                modified_files.push(crate::checkpoint::FileDiff {
-                    path: path.clone(),
-                    additions,
-                    deletions,
-                    diff_content: None, // TODO: Generate actual diff
-                });
-            }
-        } else {
-            // File was deleted
-            deleted_files.push(path.clone());
-        }
-    }
-
-    // Check for added files
-    for (path, _) in &to_map {
-        if !from_map.contains_key(path) {
-            added_files.push(path.clone());
-        }
-    }
-
-    // Calculate token delta
-    let token_delta = (to_checkpoint.metadata.total_tokens as i64)
-        - (from_checkpoint.metadata.total_tokens as i64);
-
-    Ok(crate::checkpoint::CheckpointDiff {
-        from_checkpoint_id,
-        to_checkpoint_id,
-        modified_files,
-        added_files,
-        deleted_files,
-        token_delta,
-    })
-}
-
-/// Tracks a message for checkpointing
-#[tauri::command]
-pub async fn track_checkpoint_message(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-    message: String,
-) -> Result<(), String> {
-    log::info!("Tracking message for session: {}", session_id);
-
-    let manager = app
-        .get_or_create_manager(session_id, project_id, PathBuf::from(project_path))
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    manager
-        .track_message(message)
-        .await
-        .map_err(|e| format!("Failed to track message: {}", e))
-}
-
-/// Checks if auto-checkpoint should be triggered
-#[tauri::command]
-pub async fn check_auto_checkpoint(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-    message: String,
-) -> Result<bool, String> {
-    log::info!("Checking auto-checkpoint for session: {}", session_id);
-
-    let manager = app
-        .get_or_create_manager(session_id.clone(), project_id, PathBuf::from(project_path))
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    Ok(manager.should_auto_checkpoint(&message).await)
-}
-
-/// Triggers cleanup of old checkpoints
-#[tauri::command]
-pub async fn cleanup_old_checkpoints(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-    keep_count: usize,
-) -> Result<usize, String> {
-    log::info!(
-        "Cleaning up old checkpoints for session: {}, keeping {}",
-        session_id,
-        keep_count
-    );
-
-    let manager = app
-        .get_or_create_manager(
-            session_id.clone(),
-            project_id.clone(),
-            PathBuf::from(project_path),
-        )
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    manager
-        .storage
-        .cleanup_old_checkpoints(&project_id, &session_id, keep_count)
-        .map_err(|e| format!("Failed to cleanup checkpoints: {}", e))
-}
-
-/// Gets checkpoint settings for a session
-#[tauri::command]
-pub async fn get_checkpoint_settings(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-) -> Result<serde_json::Value, String> {
-    log::info!("Getting checkpoint settings for session: {}", session_id);
-
-    let manager = app
-        .get_or_create_manager(session_id, project_id, PathBuf::from(project_path))
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    let timeline = manager.get_timeline().await;
-
-    Ok(serde_json::json!({
-        "auto_checkpoint_enabled": timeline.auto_checkpoint_enabled,
-        "checkpoint_strategy": timeline.checkpoint_strategy,
-        "total_checkpoints": timeline.total_checkpoints,
-        "current_checkpoint_id": timeline.current_checkpoint_id,
-    }))
-}
-
-/// Clears checkpoint manager for a session (cleanup on session end)
-#[tauri::command]
-pub async fn clear_checkpoint_manager(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    session_id: String,
-) -> Result<(), String> {
-    log::info!("Clearing checkpoint manager for session: {}", session_id);
-
-    app.remove_manager(&session_id).await;
-    Ok(())
-}
-
-/// Gets checkpoint state statistics (for debugging/monitoring)
-#[tauri::command]
-pub async fn get_checkpoint_state_stats(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-) -> Result<serde_json::Value, String> {
-    let active_count = app.active_count().await;
-    let active_sessions = app.list_active_sessions().await;
-
-    Ok(serde_json::json!({
-        "active_managers": active_count,
-        "active_sessions": active_sessions,
-    }))
-}
-
-/// Gets files modified in the last N minutes for a session
-#[tauri::command]
-pub async fn get_recently_modified_files(
-    app: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-    minutes: i64,
-) -> Result<Vec<String>, String> {
-    use chrono::{Duration, Utc};
-
-    log::info!(
-        "Getting files modified in the last {} minutes for session: {}",
-        minutes,
-        session_id
-    );
-
-    let manager = app
-        .get_or_create_manager(session_id, project_id, PathBuf::from(project_path))
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    let since = Utc::now() - Duration::minutes(minutes);
-    let modified_files = manager.get_files_modified_since(since).await;
-
-    // Also log the last modification time
-    if let Some(last_mod) = manager.get_last_modification_time().await {
-        log::info!("Last file modification was at: {}", last_mod);
-    }
-
-    Ok(modified_files
-        .into_iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect())
-}
-
-/// Track session messages from the frontend for checkpointing
-#[tauri::command]
-pub async fn track_session_messages(
-    state: tauri::State<'_, crate::checkpoint::state::CheckpointState>,
-    session_id: String,
-    project_id: String,
-    project_path: String,
-    messages: Vec<String>,
-) -> Result<(), String> {
-    log::info!(
-        "Tracking {} messages for session {}",
-        messages.len(),
-        session_id
-    );
-
-    let manager = state
-        .get_or_create_manager(
-            session_id.clone(),
-            project_id.clone(),
-            PathBuf::from(&project_path),
-        )
-        .await
-        .map_err(|e| format!("Failed to get checkpoint manager: {}", e))?;
-
-    for message in messages {
-        manager
-            .track_message(message)
-            .await
-            .map_err(|e| format!("Failed to track message: {}", e))?;
     }
 
     Ok(())

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
   ArrowLeft,
@@ -6,7 +6,6 @@ import {
   FolderOpen,
   Copy,
   ChevronDown,
-  GitBranch,
   Settings,
   ChevronUp,
   X,
@@ -24,13 +23,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { StreamMessage } from "./StreamMessage";
 import { FloatingPromptInput, type FloatingPromptInputRef } from "./FloatingPromptInput";
 import { ErrorBoundary } from "./ErrorBoundary";
-import { TimelineNavigator } from "./TimelineNavigator";
-import { CheckpointSettings } from "./CheckpointSettings";
 import { SlashCommandsManager } from "./SlashCommandsManager";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { SplitPane } from "@/components/ui/split-pane";
 import { WebviewPreview } from "./WebviewPreview";
+import { TimelineNavigator } from "./TimelineNavigator";
 import type { ClaudeStreamMessage } from "./AgentExecution";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
@@ -85,13 +82,7 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
   const [totalTokens, setTotalTokens] = useState(0);
   const [extractedSessionInfo, setExtractedSessionInfo] = useState<{ sessionId: string; projectId: string } | null>(null);
   const [claudeSessionId, setClaudeSessionId] = useState<string | null>(null);
-  const [showTimeline, setShowTimeline] = useState(false);
-  const [timelineVersion, setTimelineVersion] = useState(0);
-  const [showSettings, setShowSettings] = useState(false);
-  const [showForkDialog, setShowForkDialog] = useState(false);
   const [showSlashCommandsSettings, setShowSlashCommandsSettings] = useState(false);
-  const [forkCheckpointId, setForkCheckpointId] = useState<string | null>(null);
-  const [forkSessionName, setForkSessionName] = useState("");
   
   // Queued prompts state
   const [queuedPrompts, setQueuedPrompts] = useState<Array<{ id: string; prompt: string; model: "sonnet" | "opus" }>>([]);
@@ -105,19 +96,30 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
   
   // Add collapsed state for queued prompts
   const [queuedPromptsCollapsed, setQueuedPromptsCollapsed] = useState(false);
+  const [isInitialized, setIsInitialized] = useState(false);
+  const [checkpoints, setCheckpoints] = useState<Map<number, string>>(new Map()); // messageIndex -> checkpointId
   
   const parentRef = useRef<HTMLDivElement>(null);
+  // Keep a mutable counter of how many messages we have rendered so far. This is **critical**
+  // for accurate checkpoint indexing because closures in event listeners capture stale
+  // versions of `messages.length`. We update this ref whenever we mutate the `messages` state.
+  const messageCountRef = useRef<number>(0);
   const unlistenRefs = useRef<UnlistenFn[]>([]);
   const hasActiveSessionRef = useRef(false);
   const floatingPromptRef = useRef<FloatingPromptInputRef>(null);
   const queuedPromptsRef = useRef<Array<{ id: string; prompt: string; model: "sonnet" | "opus" }>>([]);
   const isMountedRef = useRef(true);
   const isListeningRef = useRef(false);
+  const isInitializedRef = useRef(false);
 
-  // Keep ref in sync with state
+  // Keep refs in sync with state
   useEffect(() => {
     queuedPromptsRef.current = queuedPrompts;
   }, [queuedPrompts]);
+  
+  useEffect(() => {
+    isInitializedRef.current = isInitialized;
+  }, [isInitialized]);
 
   // Get effective session info (from prop or extracted) - use useMemo to ensure it updates
   const effectiveSession = useMemo(() => {
@@ -228,11 +230,104 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
         if (isMountedRef.current) {
           await checkForActiveSession();
         }
+        
+        // Also initialize titor for resumed sessions
+        if (session && projectPath && !isInitialized) {
+          try {
+            await api.titorInit(session.id, projectPath);
+            setIsInitialized(true);
+            isInitializedRef.current = true;
+            console.log('[ClaudeCodeSession] Titor initialized for resumed session:', session.id);
+            
+            // Load existing checkpoints
+            loadCheckpoints();
+          } catch (err) {
+            console.error('[ClaudeCodeSession] Failed to initialize titor for resumed session:', err);
+          }
+        }
       };
       
       initializeSession();
     }
-  }, [session]); // Remove hasLoadedSession dependency to ensure it runs on mount
+  }, [session, projectPath, isInitialized]); // Add dependencies
+
+  // Initialize titor checkpoint system
+  useEffect(() => {
+    if (effectiveSession && projectPath && !isInitialized) {
+      const initTitor = async () => {
+        try {
+          await api.titorInit(effectiveSession.id, projectPath);
+          setIsInitialized(true);
+          isInitializedRef.current = true;
+          console.log('[ClaudeCodeSession] Titor initialized for session:', effectiveSession.id);
+          
+          // Load existing checkpoints
+          loadCheckpoints();
+        } catch (err) {
+          console.error('[ClaudeCodeSession] Failed to initialize titor:', err);
+        }
+      };
+      initTitor();
+    }
+  }, [effectiveSession, projectPath, isInitialized]);
+
+  // Reload checkpoints when session ID changes
+  useEffect(() => {
+    if (claudeSessionId && isInitialized) {
+      console.log('[ClaudeCodeSession] Session ID changed, reloading checkpoints for:', claudeSessionId);
+      loadCheckpoints();
+    }
+  }, [claudeSessionId, isInitialized]);
+
+  // Load checkpoints from titor
+  const loadCheckpoints = async () => {
+    // Use the actual session ID from state, not just effectiveSession
+    const sessionId = claudeSessionId || effectiveSession?.id;
+    if (!sessionId) return;
+    
+    try {
+      const checkpointList = await api.titorListCheckpoints(sessionId);
+      const checkpointMap = new Map<number, string>();
+      
+      // Build a map of messageIndex -> checkpointId
+      checkpointList.forEach(cp => {
+        checkpointMap.set(cp.messageIndex, cp.checkpointId);
+      });
+      
+      setCheckpoints(checkpointMap);
+      console.log('[ClaudeCodeSession] Loaded checkpoints for session:', sessionId, 'count:', checkpointList.length);
+    } catch (err) {
+      console.error('[ClaudeCodeSession] Failed to load checkpoints:', err);
+    }
+  };
+
+  /**
+   * Reload the entire session history from the updated JSONL file.
+   * This is required after a checkpoint restore that moves *forward* in time
+   * because the in-memory `messages` array may currently be shorter than the
+   * file that was just restored by the backend.
+   */
+  const reloadSessionHistory = useCallback(async () => {
+    if (!effectiveSession) return;
+    try {
+      const history = await api.loadSessionHistory(
+        effectiveSession.id,
+        effectiveSession.project_id
+      );
+
+      const loadedMessages: ClaudeStreamMessage[] = history.map((entry: any) => ({
+        ...entry,
+        type: entry.type || "assistant",
+      }));
+
+      setMessages(loadedMessages);
+      setRawJsonlOutput(history.map((h: any) => JSON.stringify(h)));
+      messageCountRef.current = loadedMessages.length;
+    } catch (err) {
+      console.error('[ClaudeCodeSession] Failed to reload session history:', err);
+      setError('Failed to reload session history');
+    }
+  }, [effectiveSession]);
 
   // Report streaming state changes
   useEffect(() => {
@@ -276,6 +371,8 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
       }));
       
       setMessages(loadedMessages);
+      // Update live counter so future streamed messages have the correct index
+      messageCountRef.current = loadedMessages.length;
       setRawJsonlOutput(history.map(h => JSON.stringify(h)));
       
       // After loading history, we're continuing a conversation
@@ -350,9 +447,13 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
         // Parse and display
         const message = JSON.parse(event.payload) as ClaudeStreamMessage;
         setMessages(prev => [...prev, message]);
-      } catch (err) {
+        messageCountRef.current += 1;
+        
+        // Auto-checkpoint on assistant messages
+        // REMOVED: Frontend checkpoint creation logic
+    } catch (err) {
         console.error("Failed to parse message:", err, event.payload);
-      }
+    }
     });
 
     const errorUnlisten = await listen<string>(`claude-error:${sessionId}`, (event) => {
@@ -370,7 +471,17 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
       }
     });
 
-    unlistenRefs.current = [outputUnlisten, errorUnlisten, completeUnlisten];
+    // Subscribe to backend-emitted checkpoint events
+    const checkpointUnlisten = await listen<{ checkpointId: string; messageIndex: number }>(
+        `checkpoint-created:${sessionId}`,
+        (event) => {
+                          const { checkpointId, messageIndex } = event.payload;
+              setCheckpoints(prev => new Map(prev).set(messageIndex, checkpointId));
+              console.log('[ClaudeCodeSession] Checkpoint created event received:', { checkpointId, messageIndex });
+        }
+    );
+
+    unlistenRefs.current = [outputUnlisten, errorUnlisten, completeUnlisten, checkpointUnlisten];
     
     // Mark as loading to show the session is active
     if (isMountedRef.current) {
@@ -468,12 +579,21 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
 
           const specificCompleteUnlisten = await listen<boolean>(`claude-complete:${sid}`, (evt) => {
             console.log('[ClaudeCodeSession] Received claude-complete (scoped):', evt.payload);
-            processComplete(evt.payload);
+            processComplete();
           });
+
+          // Subscribe to backend-emitted checkpoint events
+          const checkpointUnlistenScoped = await listen<{ checkpointId: string; messageIndex: number }>(
+              `checkpoint-created:${sid}`,
+              (event) => {
+                  const { checkpointId, messageIndex } = event.payload;
+                  setCheckpoints(prev => new Map(prev).set(messageIndex, checkpointId));
+              }
+          );
 
           // Replace existing unlisten refs with these new ones (after cleaning up)
           unlistenRefs.current.forEach((u) => u());
-          unlistenRefs.current = [specificOutputUnlisten, specificErrorUnlisten, specificCompleteUnlisten];
+          unlistenRefs.current = [specificOutputUnlisten, specificErrorUnlisten, specificCompleteUnlisten, checkpointUnlistenScoped];
         };
 
         // Generic listeners (catch-all)
@@ -495,6 +615,23 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
                   setExtractedSessionInfo({ sessionId: msg.session_id, projectId });
                 }
 
+                // Initialize titor for this new session
+                // Note: We always initialize for a new session, even if we had initialized for a previous one
+                if (projectPath) {
+                  try {
+                    await api.titorInit(msg.session_id, projectPath);
+                    setIsInitialized(true);
+                    isInitializedRef.current = true;
+                    console.log('[ClaudeCodeSession] Titor initialized for new session:', msg.session_id);
+                    
+                    // Clear previous checkpoints and load for new session
+                    setCheckpoints(new Map());
+                    await loadCheckpoints();
+                  } catch (err) {
+                    console.error('[ClaudeCodeSession] Failed to initialize titor for new session:', err);
+                  }
+                }
+
                 // Switch to session-specific listeners
                 await attachSessionSpecificListeners(msg.session_id);
               }
@@ -505,7 +642,7 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
         });
 
         // Helper to process any JSONL stream message string
-        function handleStreamMessage(payload: string) {
+        const handleStreamMessage = (payload: string) => {
           try {
             // Don't process if component unmounted
             if (!isMountedRef.current) return;
@@ -515,39 +652,21 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
 
             const message = JSON.parse(payload) as ClaudeStreamMessage;
             setMessages((prev) => [...prev, message]);
-          } catch (err) {
+            // Increment the counter *after* pushing the message so it stays in sync
+            messageCountRef.current += 1;
+            
+            // Auto-checkpoint on assistant messages
+            // REMOVED: Frontend checkpoint creation logic
+        } catch (err) {
             console.error('Failed to parse message:', err, payload);
-          }
         }
+        };
 
         // Helper to handle completion events (both generic and scoped)
-        const processComplete = async (success: boolean) => {
+        const processComplete = async () => {
           setIsLoading(false);
           hasActiveSessionRef.current = false;
           isListeningRef.current = false; // Reset listening state
-
-          if (effectiveSession && success) {
-            try {
-              const settings = await api.getCheckpointSettings(
-                effectiveSession.id,
-                effectiveSession.project_id,
-                projectPath
-              );
-
-              if (settings.auto_checkpoint_enabled) {
-                await api.checkAutoCheckpoint(
-                  effectiveSession.id,
-                  effectiveSession.project_id,
-                  projectPath,
-                  prompt
-                );
-                // Reload timeline to show new checkpoint
-                setTimelineVersion((v) => v + 1);
-              }
-            } catch (err) {
-              console.error('Failed to check auto checkpoint:', err);
-            }
-          }
 
           // Process queued prompts after completion
           if (queuedPromptsRef.current.length > 0) {
@@ -566,16 +685,16 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
           setError(evt.payload);
         });
 
-        const genericCompleteUnlisten = await listen<boolean>('claude-complete', (evt) => {
-          console.log('[ClaudeCodeSession] Received claude-complete (generic):', evt.payload);
-          processComplete(evt.payload);
+        const genericCompleteUnlisten = await listen<boolean>('claude-complete', (_evt) => {
+          console.log('[ClaudeCodeSession] Received claude-complete (generic)');
+          processComplete();
         });
 
         // Store the generic unlisteners for now; they may be replaced later.
         unlistenRefs.current = [genericOutputUnlisten, genericErrorUnlisten, genericCompleteUnlisten];
 
         // --------------------------------------------------------------------
-        // 2️⃣  Auto-checkpoint logic moved after listener setup (unchanged)
+        // 2️⃣  Execute command after listener setup
         // --------------------------------------------------------------------
 
         // Add the user message immediately to the UI (after setting up listeners)
@@ -688,13 +807,6 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
     setCopyPopoverOpen(false);
   };
 
-  const handleCheckpointSelect = async () => {
-    // Reload messages from the checkpoint
-    await loadSessionHistory();
-    // Ensure timeline reloads to highlight current checkpoint
-    setTimelineVersion((v) => v + 1);
-  };
-
   const handleCancelExecution = async () => {
     if (!claudeSessionId || !isLoading) return;
     
@@ -747,44 +859,6 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
     }
   };
 
-  const handleFork = (checkpointId: string) => {
-    setForkCheckpointId(checkpointId);
-    setForkSessionName(`Fork-${new Date().toISOString().slice(0, 10)}`);
-    setShowForkDialog(true);
-  };
-
-  const handleConfirmFork = async () => {
-    if (!forkCheckpointId || !forkSessionName.trim() || !effectiveSession) return;
-    
-    try {
-      setIsLoading(true);
-      setError(null);
-      
-      const newSessionId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      await api.forkFromCheckpoint(
-        forkCheckpointId,
-        effectiveSession.id,
-        effectiveSession.project_id,
-        projectPath,
-        newSessionId,
-        forkSessionName
-      );
-      
-      // Open the new forked session
-      // You would need to implement navigation to the new session
-      console.log("Forked to new session:", newSessionId);
-      
-      setShowForkDialog(false);
-      setForkCheckpointId(null);
-      setForkSessionName("");
-    } catch (err) {
-      console.error("Failed to fork checkpoint:", err);
-      setError("Failed to fork checkpoint");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   // Handle URL detection from terminal output
   const handleLinkDetected = (url: string) => {
     if (!showPreview && !showPreviewPrompt) {
@@ -824,15 +898,8 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
       // Clean up listeners
       unlistenRefs.current.forEach(unlisten => unlisten());
       unlistenRefs.current = [];
-      
-      // Clear checkpoint manager when session ends
-      if (effectiveSession) {
-        api.clearCheckpointManager(effectiveSession.id).catch(err => {
-          console.error("Failed to clear checkpoint manager:", err);
-        });
-      }
     };
-  }, [effectiveSession, projectPath]);
+  }, []);
 
   const messagesList = (
     <div
@@ -870,6 +937,71 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
                   message={message} 
                   streamMessages={messages}
                   onLinkDetected={handleLinkDetected}
+                  messageIndex={virtualItem.index}
+                  sessionId={effectiveSession?.id}
+                  onCheckpointJump={async (checkpointId) => {
+                    const currentSessionId = claudeSessionId || effectiveSession?.id;
+                    if (currentSessionId) {
+                      try {
+                        // Cancel current Claude session if running
+                        if (claudeSessionId && isLoading) {
+                          try {
+                            await api.cancelClaudeExecution(claudeSessionId);
+                            
+                            // Clean up listeners
+                            unlistenRefs.current.forEach(unlisten => unlisten());
+                            unlistenRefs.current = [];
+                            
+                            // Reset states
+                            setIsLoading(false);
+                            hasActiveSessionRef.current = false;
+                            isListeningRef.current = false;
+                            setError(null);
+                            
+                            // Clear queued prompts
+                            setQueuedPrompts([]);
+                            
+                            // Add a message indicating checkpoint was jumped to
+                            const jumpMessage: ClaudeStreamMessage = {
+                              type: "system",
+                              subtype: "info",
+                              result: "Session terminated to jump to checkpoint",
+                              timestamp: new Date().toISOString()
+                            };
+                            setMessages(prev => [...prev, jumpMessage]);
+                          } catch (err) {
+                            console.error("Failed to cancel execution during checkpoint jump:", err);
+                          }
+                        }
+                        
+                        const restoreRes = await api.titorRestoreCheckpoint(currentSessionId, checkpointId);
+                        console.log('[ClaudeCodeSession] Checkpoint restore result:', restoreRes);
+                        
+                        // Trim in-memory messages immediately for seamless UX
+                        setMessages(prev => {
+                          const trimmed = prev.slice(0, restoreRes.messageIndex + 1);
+                          console.log(`[ClaudeCodeSession] Trimming messages from ${prev.length} to ${trimmed.length}`);
+                          return trimmed;
+                        });
+                        messageCountRef.current = restoreRes.messageIndex + 1;
+                        
+                        // IMPORTANT: Do NOT clear checkpoints - they remain valid for time travel
+                        // Reload checkpoints to ensure we have the complete list
+                        await loadCheckpoints();
+
+                        // Refresh from disk so forward restores load additional messages
+                        await reloadSessionHistory();
+                      } catch (err) {
+                        console.error('Failed to jump to checkpoint:', err);
+                        setError('Failed to jump to checkpoint');
+                      }
+                    }
+                  }}
+                  checkpointInfo={{
+                    hasCheckpoint: checkpoints.has(virtualItem.index),
+                    canCreateCheckpoint: message.type === 'assistant',
+                    checkpointId: checkpoints.get(virtualItem.index)
+                  }}
                 />
               </motion.div>
             );
@@ -987,6 +1119,78 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
           </div>
           
           <div className="flex items-center gap-2">
+            {/* Timeline Navigator */}
+            {(claudeSessionId || effectiveSession) && projectPath && isInitialized && (
+              <TimelineNavigator
+                sessionId={claudeSessionId || effectiveSession?.id || ''}
+                projectPath={projectPath}
+                currentMessageIndex={displayableMessages.length - 1}
+                messages={messages}
+                onCheckpointRestore={async (checkpointId) => {
+                  // Cancel current Claude session if running
+                  if (claudeSessionId && isLoading) {
+                    try {
+                      await api.cancelClaudeExecution(claudeSessionId);
+                      
+                      // Clean up listeners
+                      unlistenRefs.current.forEach(unlisten => unlisten());
+                      unlistenRefs.current = [];
+                      
+                      // Reset states
+                      setIsLoading(false);
+                      hasActiveSessionRef.current = false;
+                      isListeningRef.current = false;
+                      setError(null);
+                      
+                      // Clear queued prompts
+                      setQueuedPrompts([]);
+                      
+                      // Add a message indicating checkpoint was restored
+                      const restoreMessage: ClaudeStreamMessage = {
+                        type: "system",
+                        subtype: "info",
+                        result: "Session terminated due to checkpoint restore",
+                        timestamp: new Date().toISOString()
+                      };
+                      setMessages(prev => [...prev, restoreMessage]);
+                    } catch (err) {
+                      console.error("Failed to cancel execution during restore:", err);
+                    }
+                  }
+                  
+                  // Restore checkpoint and update UI
+                  const currentSessionId = claudeSessionId || effectiveSession?.id || '';
+                  const restoreRes = await api.titorRestoreCheckpoint(currentSessionId, checkpointId);
+                  console.log('[ClaudeCodeSession] Timeline checkpoint restore result:', restoreRes);
+                  
+                  // Trim in-memory messages immediately
+                  setMessages(prev => {
+                    const trimmed = prev.slice(0, restoreRes.messageIndex + 1);
+                    console.log(`[ClaudeCodeSession] Timeline trimming messages from ${prev.length} to ${trimmed.length}`);
+                    return trimmed;
+                  });
+                  messageCountRef.current = restoreRes.messageIndex + 1;
+                  
+                  // IMPORTANT: Do NOT clear checkpoints - they remain valid for time travel
+                  // Reload checkpoints to ensure we have the complete list
+                  await loadCheckpoints();
+
+                  // Refresh state from disk (handles forward restores)
+                  await reloadSessionHistory();
+                }}
+                onForkCheckpoint={(forkedCheckpointId, forkMessage) => {
+                  // Add a message indicating fork was created
+                  const forkInfoMessage: ClaudeStreamMessage = {
+                    type: "system",
+                    subtype: "info",
+                    result: `✨ Fork created: "${forkMessage}"\n\nForked checkpoint ID: ${forkedCheckpointId}\n\nNote: The current Claude session is still running. If you want to work from the forked checkpoint, please cancel the current execution and restore to the forked checkpoint.`,
+                    timestamp: new Date().toISOString()
+                  };
+                  setMessages(prev => [...prev, forkInfoMessage]);
+                }}
+              />
+            )}
+            
             {projectPath && onProjectSettings && (
               <Button
                 variant="outline"
@@ -1010,49 +1214,6 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
               </Button>
             )}
             <div className="flex items-center gap-2">
-              {showSettings && (
-                <CheckpointSettings
-                  sessionId={effectiveSession?.id || ''}
-                  projectId={effectiveSession?.project_id || ''}
-                  projectPath={projectPath}
-                />
-              )}
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => setShowSettings(!showSettings)}
-                      className="h-8 w-8"
-                    >
-                      <Settings className={cn("h-4 w-4", showSettings && "text-primary")} />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    <p>Checkpoint Settings</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-              {effectiveSession && (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => setShowTimeline(!showTimeline)}
-                        className="h-8 w-8"
-                      >
-                        <GitBranch className={cn("h-4 w-4", showTimeline && "text-primary")} />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Timeline Navigator</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )}
               {messages.length > 0 && (
                 <Popover
                   trigger={
@@ -1095,10 +1256,7 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
         </motion.div>
 
         {/* Main Content Area */}
-        <div className={cn(
-          "flex-1 overflow-hidden transition-all duration-300",
-          showTimeline && "sm:mr-96"
-        )}>
+        <div className="flex-1 overflow-hidden transition-all duration-300">
           {showPreview ? (
             // Split pane layout when preview is active
             <SplitPane
@@ -1263,10 +1421,7 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
             </motion.div>
           )}
 
-          <div className={cn(
-            "fixed bottom-0 left-0 right-0 transition-all duration-300 z-50",
-            showTimeline && "sm:right-96"
-          )}>
+          <div className="fixed bottom-0 left-0 right-0 transition-all duration-300 z-50">
             <FloatingPromptInput
               ref={floatingPromptRef}
               onSend={handleSendPrompt}
@@ -1299,107 +1454,7 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
             </div>
           )}
         </ErrorBoundary>
-
-        {/* Timeline */}
-        <AnimatePresence>
-          {showTimeline && effectiveSession && (
-            <motion.div
-              initial={{ x: "100%" }}
-              animate={{ x: 0 }}
-              exit={{ x: "100%" }}
-              transition={{ type: "spring", damping: 20, stiffness: 300 }}
-              className="fixed right-0 top-0 h-full w-full sm:w-96 bg-background border-l border-border shadow-xl z-30 overflow-hidden"
-            >
-              <div className="h-full flex flex-col">
-                {/* Timeline Header */}
-                <div className="flex items-center justify-between p-4 border-b border-border">
-                  <h3 className="text-lg font-semibold">Session Timeline</h3>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setShowTimeline(false)}
-                    className="h-8 w-8"
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-                
-                {/* Timeline Content */}
-                <div className="flex-1 overflow-y-auto p-4">
-                  <TimelineNavigator
-                    sessionId={effectiveSession.id}
-                    projectId={effectiveSession.project_id}
-                    projectPath={projectPath}
-                    currentMessageIndex={messages.length - 1}
-                    onCheckpointSelect={handleCheckpointSelect}
-                    onFork={handleFork}
-                    refreshVersion={timelineVersion}
-                  />
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
-
-      {/* Fork Dialog */}
-      <Dialog open={showForkDialog} onOpenChange={setShowForkDialog}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Fork Session</DialogTitle>
-            <DialogDescription>
-              Create a new session branch from the selected checkpoint.
-            </DialogDescription>
-          </DialogHeader>
-          
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="fork-name">New Session Name</Label>
-              <Input
-                id="fork-name"
-                placeholder="e.g., Alternative approach"
-                value={forkSessionName}
-                onChange={(e) => setForkSessionName(e.target.value)}
-                onKeyPress={(e) => {
-                  if (e.key === "Enter" && !isLoading) {
-                    handleConfirmFork();
-                  }
-                }}
-              />
-            </div>
-          </div>
-          
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setShowForkDialog(false)}
-              disabled={isLoading}
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleConfirmFork}
-              disabled={isLoading || !forkSessionName.trim()}
-            >
-              Create Fork
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Settings Dialog */}
-      {showSettings && effectiveSession && (
-        <Dialog open={showSettings} onOpenChange={setShowSettings}>
-          <DialogContent className="max-w-2xl">
-            <CheckpointSettings
-              sessionId={effectiveSession.id}
-              projectId={effectiveSession.project_id}
-              projectPath={projectPath}
-              onClose={() => setShowSettings(false)}
-            />
-          </DialogContent>
-        </Dialog>
-      )}
 
       {/* Slash Commands Settings Dialog */}
       {showSlashCommandsSettings && (
@@ -1417,6 +1472,31 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
           </DialogContent>
         </Dialog>
       )}
+
+      {/* Preview Prompt Dialog */}
+      <Dialog open={showPreviewPrompt} onOpenChange={setShowPreviewPrompt}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Web Preview Available</DialogTitle>
+            <DialogDescription>
+              A local server is running at {previewUrl}. Would you like to open a preview?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowPreviewPrompt(false)}>
+              No thanks
+            </Button>
+            <Button
+              onClick={() => {
+                setShowPreview(true);
+                setShowPreviewPrompt(false);
+              }}
+            >
+              Open Preview
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

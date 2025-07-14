@@ -4,7 +4,10 @@ import {
   User, 
   Bot, 
   AlertCircle, 
-  CheckCircle2
+  CheckCircle2,
+  History,
+  GitBranchPlus,
+  RotateCcw,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -13,6 +16,13 @@ import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { claudeSyntaxTheme } from "@/lib/claudeSyntaxTheme";
 import type { ClaudeStreamMessage } from "./AgentExecution";
+import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   TodoWidget,
   TodoReadWidget,
@@ -45,12 +55,29 @@ interface StreamMessageProps {
   className?: string;
   streamMessages: ClaudeStreamMessage[];
   onLinkDetected?: (url: string) => void;
+  messageIndex?: number;
+  sessionId?: string;
+  onCheckpointJump?: (checkpointId: string) => void;
+  checkpointInfo?: {
+    checkpointId?: string;
+    hasCheckpoint: boolean;
+    canCreateCheckpoint: boolean;
+  };
 }
 
 /**
  * Component to render a single Claude Code stream message
  */
-const StreamMessageComponent: React.FC<StreamMessageProps> = ({ message, className, streamMessages, onLinkDetected }) => {
+const StreamMessageComponent: React.FC<StreamMessageProps> = ({ 
+  message, 
+  className, 
+  streamMessages, 
+  onLinkDetected,
+  messageIndex: _messageIndex,
+  sessionId: _sessionId,
+  onCheckpointJump: _onCheckpointJump,
+  checkpointInfo: _checkpointInfo
+}) => {
   // State to track tool results mapped by tool call ID
   const [toolResults, setToolResults] = useState<Map<string, any>>(new Map());
   
@@ -731,4 +758,86 @@ const StreamMessageComponent: React.FC<StreamMessageProps> = ({ message, classNa
   }
 };
 
-export const StreamMessage = React.memo(StreamMessageComponent);
+export const StreamMessage = React.memo((props: StreamMessageProps) => {
+  const { checkpointInfo, onCheckpointJump, sessionId, messageIndex } = props;
+  const [showHoverUI, setShowHoverUI] = useState(false);
+  
+  const content = <StreamMessageComponent {...props} />;
+  
+  // Only show hover UI for assistant messages and when checkpoint info is available
+  if (props.message.type !== 'assistant' || !checkpointInfo || !sessionId) {
+    return content;
+  }
+  
+  return (
+    <div 
+      className="relative group"
+      onMouseEnter={() => setShowHoverUI(true)}
+      onMouseLeave={() => setShowHoverUI(false)}
+    >
+      {content}
+      
+      {/* Checkpoint hover UI */}
+      {showHoverUI && (
+        <div className="absolute top-2 right-2 z-10 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-background/95 backdrop-blur-sm rounded-md border p-1 shadow-lg">
+          {checkpointInfo.hasCheckpoint && checkpointInfo.checkpointId && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7"
+                    onClick={() => onCheckpointJump?.(checkpointInfo.checkpointId!)}
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Restore to this checkpoint</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+          
+          {checkpointInfo.hasCheckpoint && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7"
+                    onClick={() => {
+                      // TODO: Implement fork functionality
+                      console.log('Fork from checkpoint:', checkpointInfo.checkpointId);
+                    }}
+                  >
+                    <GitBranchPlus className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Fork from this checkpoint</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+          
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="flex items-center gap-1 px-2 py-1">
+                  <History className="h-3.5 w-3.5 text-muted-foreground" />
+                  <span className="text-xs text-muted-foreground">
+                    {checkpointInfo.hasCheckpoint ? 'Checkpoint' : 'No checkpoint'}
+                  </span>
+                </div>
+              </TooltipTrigger>
+              <TooltipContent>
+                {checkpointInfo.hasCheckpoint 
+                  ? `Message ${messageIndex !== undefined ? messageIndex + 1 : 'N/A'} has a checkpoint`
+                  : 'No checkpoint at this message'}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
+      )}
+    </div>
+  );
+});

@@ -1,10 +1,10 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 // Declare modules
-pub mod checkpoint;
 pub mod claude_binary;
 pub mod commands;
 pub mod process;
+pub mod checkpoint;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

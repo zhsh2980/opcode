@@ -237,98 +237,114 @@ export interface UsageStats {
 }
 
 /**
- * Represents a checkpoint in the session timeline
+ * Titor checkpoint information
  */
-export interface Checkpoint {
-  id: string;
-  sessionId: string;
-  projectId: string;
-  messageIndex: number;
-  timestamp: string;
-  description?: string;
-  parentCheckpointId?: string;
-  metadata: CheckpointMetadata;
-}
-
-/**
- * Metadata associated with a checkpoint
- */
-export interface CheckpointMetadata {
-  totalTokens: number;
-  modelUsed: string;
-  userPrompt: string;
-  fileChanges: number;
-  snapshotSize: number;
-}
-
-/**
- * Represents a file snapshot at a checkpoint
- */
-export interface FileSnapshot {
+export interface TitorCheckpointInfo {
+  /** The checkpoint ID (from titor) */
   checkpointId: string;
-  filePath: string;
-  content: string;
-  hash: string;
-  isDeleted: boolean;
-  permissions?: number;
-  size: number;
+  /** Message index this checkpoint corresponds to */
+  messageIndex: number;
+  /** Timestamp when checkpoint was created */
+  timestamp: string;
+  /** Session ID this checkpoint belongs to */
+  sessionId?: string;
+  /** Description or summary of the checkpoint */
+  description?: string;
+  /** Number of files in the checkpoint */
+  fileCount: number;
+  /** Total size of files */
+  totalSize: number;
 }
 
 /**
- * Represents a node in the timeline tree
+ * Timeline information for UI visualization
  */
-export interface TimelineNode {
-  checkpoint: Checkpoint;
-  children: TimelineNode[];
-  fileSnapshotIds: string[];
-}
-
-/**
- * The complete timeline for a session
- */
-export interface SessionTimeline {
-  sessionId: string;
-  rootNode?: TimelineNode;
+export interface TitorTimelineInfo {
+  /** Current checkpoint ID */
   currentCheckpointId?: string;
-  autoCheckpointEnabled: boolean;
-  checkpointStrategy: CheckpointStrategy;
-  totalCheckpoints: number;
+  /** List of checkpoints */
+  checkpoints: TitorCheckpointInfo[];
+  /** Timeline tree structure (if available from titor) */
+  timelineTree?: any;
 }
 
 /**
- * Strategy for automatic checkpoint creation
+ * Result of a restore operation
  */
-export type CheckpointStrategy = 'manual' | 'per_prompt' | 'per_tool_use' | 'smart';
-
-/**
- * Result of a checkpoint operation
- */
-export interface CheckpointResult {
-  checkpoint: Checkpoint;
-  filesProcessed: number;
+export interface TitorRestoreResult {
+  /** Number of files restored */
+  filesRestored: number;
+  /** Number of files deleted */
+  filesDeleted: number;
+  /** Total bytes written */
+  bytesWritten: number;
+  /** Duration in milliseconds */
+  durationMs: number;
+  /** Any warnings during restoration */
   warnings: string[];
+  /** Message index this checkpoint corresponds to */
+  messageIndex: number;
 }
 
 /**
- * Diff between two checkpoints
+ * Diff response from titor
  */
-export interface CheckpointDiff {
-  fromCheckpointId: string;
-  toCheckpointId: string;
-  modifiedFiles: FileDiff[];
-  addedFiles: string[];
-  deletedFiles: string[];
-  tokenDelta: number;
+export interface TitorDiffResponse {
+  fromId: string;
+  toId: string;
+  addedFiles: any[];
+  modifiedFiles: any[];
+  deletedFiles: any[];
+  stats: any;
 }
 
 /**
- * Diff for a single file
+ * GC response from titor
  */
-export interface FileDiff {
+export interface TitorGcResponse {
+  stats: any;
+}
+
+export interface LineChangeResponse {
+  /** Type of change: "added", "deleted", or "context" */
+  changeType: string;
+  /** Line number in the file */
+  lineNumber: number;
+  /** Content of the line */
+  content: string;
+}
+
+export interface HunkResponse {
+  /** Starting line in the from file */
+  fromLine: number;
+  /** Number of lines in the from file */
+  fromCount: number;
+  /** Starting line in the to file */
+  toLine: number;
+  /** Number of lines in the to file */
+  toCount: number;
+  /** Line changes in this hunk */
+  changes: LineChangeResponse[];
+}
+
+export interface FileDiffResponse {
+  /** Path of the file */
   path: string;
-  additions: number;
-  deletions: number;
-  diffContent?: string;
+  /** Whether the file is binary */
+  isBinary: boolean;
+  /** Hunks of changes */
+  hunks: HunkResponse[];
+}
+
+export interface DetailedDiffResponse {
+  /** Basic diff information (files added/modified/deleted) */
+  basicDiff: TitorDiffResponse;
+  /** Detailed file diffs with line-level changes */
+  fileDiffs: FileDiffResponse[];
+  /** Total lines added across all files */
+  totalLinesAdded: number;
+  /** Total lines deleted across all files */
+  totalLinesDeleted: number;
 }
 
 /**
@@ -1105,247 +1121,218 @@ export const api = {
     }
   },
 
+
+
   /**
-   * Creates a checkpoint for the current session state
+   * Initialize titor checkpoint for a session
+   * @param sessionId - The session ID
+   * @param projectPath - The project path
+   * @returns Promise resolving to success message
    */
-  async createCheckpoint(
-    sessionId: string,
-    projectId: string,
-    projectPath: string,
-    messageIndex?: number,
+  async titorInit(sessionId: string, projectPath: string): Promise<string> {
+    try {
+      return await invoke<string>("titor_init_session", { sessionId, projectPath });
+    } catch (error) {
+      console.error("Failed to initialize titor:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * Create checkpoint for a message
+   * @param sessionId - The session ID
+   * @param messageIndex - Index of the message
+   * @param message - The message content
+   * @returns Promise resolving to checkpoint ID
+   */
+  async titorCheckpointMessage(sessionId: string, messageIndex: number, message: string): Promise<string> {
+    try {
+      return await invoke<string>("titor_checkpoint_message", { sessionId, messageIndex, message });
+    } catch (error) {
+      console.error("Failed to checkpoint message:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get timeline information
+   * @param sessionId - The session ID
+   * @returns Promise resolving to timeline info
+   */
+  async titorGetTimeline(sessionId: string): Promise<TitorTimelineInfo> {
+    try {
+      return await invoke<TitorTimelineInfo>("titor_get_timeline", { sessionId });
+    } catch (error) {
+      console.error("Failed to get timeline:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * List checkpoints
+   * @param sessionId - The session ID
+   * @returns Promise resolving to list of checkpoints
+   */
+  async titorListCheckpoints(sessionId: string): Promise<TitorCheckpointInfo[]> {
+    try {
+      return await invoke<TitorCheckpointInfo[]>("titor_list_checkpoints", { sessionId });
+    } catch (error) {
+      console.error("Failed to list checkpoints:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * Restore to checkpoint
+   * @param sessionId - The session ID
+   * @param checkpointId - The checkpoint ID to restore to
+   * @returns Promise resolving to restore result
+   */
+  async titorRestoreCheckpoint(sessionId: string, checkpointId: string): Promise<TitorRestoreResult> {
+    try {
+      return await invoke<TitorRestoreResult>("titor_restore_checkpoint", { sessionId, checkpointId });
+    } catch (error) {
+      console.error("Failed to restore checkpoint:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * Fork from checkpoint
+   * @param sessionId - The session ID
+   * @param checkpointId - The checkpoint ID to fork from
+   * @param newSessionId - The new session ID for the fork
+   * @param description - Optional description for the fork
+   * @returns Promise resolving to fork ID
+   */
+  async titorForkCheckpoint(
+    sessionId: string, 
+    checkpointId: string, 
+    newSessionId: string, 
     description?: string
-  ): Promise<CheckpointResult> {
-    return invoke("create_checkpoint", {
-      sessionId,
-      projectId,
-      projectPath,
-      messageIndex,
-      description
-    });
+  ): Promise<string> {
+    try {
+      return await invoke<string>("titor_fork_checkpoint", { 
+        sessionId, 
+        checkpointId, 
+        newSessionId, 
+        description 
+      });
+    } catch (error) {
+      console.error("Failed to fork checkpoint:", error);
+      throw error;
+    }
   },
 
   /**
-   * Restores a session to a specific checkpoint
+   * Get checkpoint at message index
+   * @param sessionId - The session ID
+   * @param messageIndex - The message index
+   * @returns Promise resolving to checkpoint ID if exists
    */
-  async restoreCheckpoint(
-    checkpointId: string,
+  async titorGetCheckpointAtMessage(sessionId: string, messageIndex: number): Promise<string | null> {
+    try {
+      return await invoke<string | null>("titor_get_checkpoint_at_message", { sessionId, messageIndex });
+    } catch (error) {
+      console.error("Failed to get checkpoint at message:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * Verify checkpoint integrity
+   * @param sessionId - The session ID
+   * @param checkpointId - The checkpoint ID
+   * @returns Promise resolving to validity status
+   */
+  async titorVerifyCheckpoint(sessionId: string, checkpointId: string): Promise<boolean> {
+    try {
+      return await invoke<boolean>("titor_verify_checkpoint", { sessionId, checkpointId });
+    } catch (error) {
+      console.error("Failed to verify checkpoint:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get diff between checkpoints
+   * @param sessionId - The session ID
+   * @param fromCheckpointId - Source checkpoint ID
+   * @param toCheckpointId - Target checkpoint ID
+   * @returns Promise resolving to diff result
+   */
+  async titorDiffCheckpoints(
+    sessionId: string, 
+    fromCheckpointId: string, 
+    toCheckpointId: string
+  ): Promise<TitorDiffResponse> {
+    try {
+      return await invoke<TitorDiffResponse>("titor_diff_checkpoints", { 
+        sessionId, 
+        fromCheckpointId, 
+        toCheckpointId 
+      });
+    } catch (error) {
+      console.error("Failed to diff checkpoints:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get detailed diff with line-level changes between checkpoints
+   * @param sessionId - The session ID
+   * @param fromCheckpointId - Source checkpoint ID
+   * @param toCheckpointId - Target checkpoint ID
+   * @param contextLines - Number of context lines to show (default: 3)
+   * @param ignoreWhitespace - Whether to ignore whitespace changes (default: false)
+   * @returns Promise resolving to detailed diff result
+   */
+  async titorDiffCheckpointsDetailed(
     sessionId: string,
-    projectId: string,
-    projectPath: string
-  ): Promise<CheckpointResult> {
-    return invoke("restore_checkpoint", {
-      checkpointId,
-      sessionId,
-      projectId,
-      projectPath
-    });
-  },
-
-  /**
-   * Lists all checkpoints for a session
-   */
-  async listCheckpoints(
-    sessionId: string,
-    projectId: string,
-    projectPath: string
-  ): Promise<Checkpoint[]> {
-    return invoke("list_checkpoints", {
-      sessionId,
-      projectId,
-      projectPath
-    });
-  },
-
-  /**
-   * Forks a new timeline branch from a checkpoint
-   */
-  async forkFromCheckpoint(
-    checkpointId: string,
-    sessionId: string,
-    projectId: string,
-    projectPath: string,
-    newSessionId: string,
-    description?: string
-  ): Promise<CheckpointResult> {
-    return invoke("fork_from_checkpoint", {
-      checkpointId,
-      sessionId,
-      projectId,
-      projectPath,
-      newSessionId,
-      description
-    });
-  },
-
-  /**
-   * Gets the timeline for a session
-   */
-  async getSessionTimeline(
-    sessionId: string,
-    projectId: string,
-    projectPath: string
-  ): Promise<SessionTimeline> {
-    return invoke("get_session_timeline", {
-      sessionId,
-      projectId,
-      projectPath
-    });
-  },
-
-  /**
-   * Updates checkpoint settings for a session
-   */
-  async updateCheckpointSettings(
-    sessionId: string,
-    projectId: string,
-    projectPath: string,
-    autoCheckpointEnabled: boolean,
-    checkpointStrategy: CheckpointStrategy
-  ): Promise<void> {
-    return invoke("update_checkpoint_settings", {
-      sessionId,
-      projectId,
-      projectPath,
-      autoCheckpointEnabled,
-      checkpointStrategy
-    });
-  },
-
-  /**
-   * Gets diff between two checkpoints
-   */
-  async getCheckpointDiff(
     fromCheckpointId: string,
     toCheckpointId: string,
-    sessionId: string,
-    projectId: string
-  ): Promise<CheckpointDiff> {
+    contextLines?: number,
+    ignoreWhitespace?: boolean
+  ): Promise<DetailedDiffResponse> {
     try {
-      return await invoke<CheckpointDiff>("get_checkpoint_diff", {
-        fromCheckpointId,
-        toCheckpointId,
+      return await invoke<DetailedDiffResponse>("titor_diff_checkpoints_detailed", {
         sessionId,
-        projectId
+        fromId: fromCheckpointId,
+        toId: toCheckpointId,
+        contextLines,
+        ignoreWhitespace
       });
     } catch (error) {
-      console.error("Failed to get checkpoint diff:", error);
+      console.error("Failed to get detailed diff:", error);
       throw error;
     }
   },
 
   /**
-   * Tracks a message for checkpointing
+   * Run garbage collection
+   * @param sessionId - The session ID
+   * @returns Promise resolving to GC stats
    */
-  async trackCheckpointMessage(
-    sessionId: string,
-    projectId: string,
-    projectPath: string,
-    message: string
-  ): Promise<void> {
+  async titorGc(sessionId: string): Promise<TitorGcResponse> {
     try {
-      await invoke("track_checkpoint_message", {
-        sessionId,
-        projectId,
-        projectPath,
-        message
-      });
+      return await invoke<TitorGcResponse>("titor_gc", { sessionId });
     } catch (error) {
-      console.error("Failed to track checkpoint message:", error);
+      console.error("Failed to run gc:", error);
       throw error;
     }
   },
 
   /**
-   * Checks if auto-checkpoint should be triggered
+   * Clean up checkpoint manager when session ends
+   * @param sessionId - The session ID
+   * @returns Promise resolving when cleanup completes
    */
-  async checkAutoCheckpoint(
-    sessionId: string,
-    projectId: string,
-    projectPath: string,
-    message: string
-  ): Promise<boolean> {
-    try {
-      return await invoke<boolean>("check_auto_checkpoint", {
-        sessionId,
-        projectId,
-        projectPath,
-        message
-      });
-    } catch (error) {
-      console.error("Failed to check auto checkpoint:", error);
-      throw error;
-    }
+  async titorCleanupSession(_sessionId: string): Promise<void> {
+    // Session cleanup is now handled automatically by the backend
+    return Promise.resolve();
   },
 
-  /**
-   * Triggers cleanup of old checkpoints
-   */
-  async cleanupOldCheckpoints(
-    sessionId: string,
-    projectId: string,
-    projectPath: string,
-    keepCount: number
-  ): Promise<number> {
-    try {
-      return await invoke<number>("cleanup_old_checkpoints", {
-        sessionId,
-        projectId,
-        projectPath,
-        keepCount
-      });
-    } catch (error) {
-      console.error("Failed to cleanup old checkpoints:", error);
-      throw error;
-    }
-  },
 
-  /**
-   * Gets checkpoint settings for a session
-   */
-  async getCheckpointSettings(
-    sessionId: string,
-    projectId: string,
-    projectPath: string
-  ): Promise<{
-    auto_checkpoint_enabled: boolean;
-    checkpoint_strategy: CheckpointStrategy;
-    total_checkpoints: number;
-    current_checkpoint_id?: string;
-  }> {
-    try {
-      return await invoke("get_checkpoint_settings", {
-        sessionId,
-        projectId,
-        projectPath
-      });
-    } catch (error) {
-      console.error("Failed to get checkpoint settings:", error);
-      throw error;
-    }
-  },
-
-  /**
-   * Clears checkpoint manager for a session (cleanup on session end)
-   */
-  async clearCheckpointManager(sessionId: string): Promise<void> {
-    try {
-      await invoke("clear_checkpoint_manager", { sessionId });
-    } catch (error) {
-      console.error("Failed to clear checkpoint manager:", error);
-      throw error;
-    }
-  },
-
-  /**
-   * Tracks a batch of messages for a session for checkpointing
-   */
-  trackSessionMessages: (
-    sessionId: string, 
-    projectId: string, 
-    projectPath: string, 
-    messages: string[]
-  ): Promise<void> =>
-    invoke("track_session_messages", { sessionId, projectId, projectPath, messages }),
 
   /**
    * Adds a new MCP server
@@ -1837,3 +1824,124 @@ export const api = {
     }
   }
 };
+
+// Titor Checkpoint APIs
+
+/**
+ * Initialize titor checkpoint system for a session
+ */
+export async function titorInitSession(projectPath: string, sessionId: string): Promise<void> {
+  return invoke("titor_init_session", { projectPath, sessionId });
+}
+
+/**
+ * Create a checkpoint for a message
+ */
+export async function titorCheckpointMessage(
+  sessionId: string,
+  messageIndex: number,
+  message: string
+): Promise<string> {
+  return invoke("titor_checkpoint_message", { sessionId, messageIndex, message });
+}
+
+/**
+ * Get checkpoint ID for a specific message index
+ */
+export async function titorGetCheckpointAtMessage(
+  sessionId: string,
+  messageIndex: number
+): Promise<string | null> {
+  return invoke("titor_get_checkpoint_at_message", { sessionId, messageIndex });
+}
+
+/**
+ * Restore project to a checkpoint
+ */
+export async function titorRestoreCheckpoint(
+  sessionId: string,
+  checkpointId: string
+): Promise<TitorRestoreResult> {
+  return invoke("titor_restore_checkpoint", { sessionId, checkpointId });
+}
+
+/**
+ * Get timeline information for visualization
+ */
+export async function titorGetTimeline(sessionId: string): Promise<TitorTimelineInfo> {
+  return invoke("titor_get_timeline", { sessionId });
+}
+
+/**
+ * List all checkpoints for a session
+ */
+export async function titorListCheckpoints(sessionId: string): Promise<TitorCheckpointInfo[]> {
+  return invoke("titor_list_checkpoints", { sessionId });
+}
+
+/**
+ * Fork from a checkpoint
+ */
+export async function titorForkCheckpoint(
+  sessionId: string,
+  checkpointId: string,
+  description?: string
+): Promise<string> {
+  return invoke("titor_fork_checkpoint", { sessionId, checkpointId, description });
+}
+
+/**
+ * Get diff between two checkpoints
+ */
+export async function titorDiffCheckpoints(
+  sessionId: string,
+  fromId: string,
+  toId: string
+): Promise<TitorDiffResponse> {
+  return invoke("titor_diff_checkpoints", { sessionId, fromId, toId });
+}
+
+/**
+ * Verify checkpoint integrity
+ */
+export async function titorVerifyCheckpoint(
+  sessionId: string,
+  checkpointId: string
+): Promise<boolean> {
+  return invoke("titor_verify_checkpoint", { sessionId, checkpointId });
+}
+
+/**
+ * Run garbage collection
+ */
+export async function titorGc(sessionId: string): Promise<TitorGcResponse> {
+  return invoke("titor_gc", { sessionId });
+}
+
+/**
+ * List all checkpoints for a project (across all sessions)
+ */
+export async function titorListAllCheckpoints(projectPath: string): Promise<TitorCheckpointInfo[]> {
+  return invoke("titor_list_all_checkpoints", { projectPath });
+}
+
+/**
+ * Get detailed diff with line-level changes between checkpoints
+ */
+export async function titorDiffCheckpointsDetailed(
+  sessionId: string,
+  fromId: string,
+  toId: string,
+  contextLines?: number,
+  ignoreWhitespace?: boolean
+): Promise<DetailedDiffResponse> {
+  return invoke("titor_diff_checkpoints_detailed", {
+    sessionId,
+    fromId,
+    toId,
+    contextLines,
+    ignoreWhitespace
+  });
+}
+
+
