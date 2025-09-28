@@ -1,0 +1,190 @@
+name: Build for User (macOS x64 + Windows x64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Build version (e.g., v0.2.1-custom)'
+        required: false
+        default: 'v0.2.1-custom'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-x64:
+    name: Build macOS x64 (Intel)
+    runs-on: macos-13  # Intel runner
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build for macOS x64
+        env:
+          CI: true
+        run: |
+          echo "Building for macOS x64 (Intel)..."
+          bun run tauri build --target x86_64-apple-darwin
+
+      - name: List build artifacts
+        run: |
+          echo "Build artifacts:"
+          find src-tauri/target/x86_64-apple-darwin/release/bundle -type f
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p dist/macos-x64
+
+          # Copy DMG if exists
+          if ls src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg 1> /dev/null 2>&1; then
+            cp src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg dist/macos-x64/opcode-macos-x64.dmg
+          fi
+
+          # Copy app bundle and zip it
+          if [ -d "src-tauri/target/x86_64-apple-darwin/release/bundle/macos/opcode.app" ]; then
+            cd src-tauri/target/x86_64-apple-darwin/release/bundle/macos
+            zip -r ../../../../../../dist/macos-x64/opcode-macos-x64.app.zip opcode.app
+            cd ../../../../../../
+          fi
+
+          # Generate checksums
+          cd dist/macos-x64
+          shasum -a 256 * > checksums.txt
+          cd ../..
+
+      - name: Upload macOS x64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x64
+          path: dist/macos-x64/*
+          retention-days: 7
+
+  build-windows-x64:
+    name: Build Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build for Windows x64
+        env:
+          CI: true
+        run: |
+          echo "Building for Windows x64..."
+          bun run tauri build --target x86_64-pc-windows-msvc
+
+      - name: List build artifacts
+        run: |
+          echo "Build artifacts:"
+          Get-ChildItem -Path src-tauri\target\x86_64-pc-windows-msvc\release\bundle -Recurse -File
+
+      - name: Prepare artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\windows-x64
+
+          # Copy MSI installer if exists
+          $msiFiles = Get-ChildItem -Path "src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue
+          if ($msiFiles) {
+            Copy-Item $msiFiles[0].FullName -Destination "dist\windows-x64\opcode-windows-x64.msi"
+          }
+
+          # Copy NSIS installer if exists
+          $exeFiles = Get-ChildItem -Path "src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*.exe" -ErrorAction SilentlyContinue
+          if ($exeFiles) {
+            Copy-Item $exeFiles[0].FullName -Destination "dist\windows-x64\opcode-windows-x64-setup.exe"
+          }
+
+          # Copy standalone exe if exists
+          if (Test-Path "src-tauri\target\x86_64-pc-windows-msvc\release\opcode.exe") {
+            Copy-Item "src-tauri\target\x86_64-pc-windows-msvc\release\opcode.exe" -Destination "dist\windows-x64\opcode-windows-x64.exe"
+          }
+
+          # Generate checksums
+          $files = Get-ChildItem -Path "dist\windows-x64" -File
+          foreach ($file in $files) {
+            $hash = Get-FileHash -Path $file.FullName -Algorithm SHA256
+            "$($hash.Hash.ToLower())  $($file.Name)" | Out-File -Append -FilePath "dist\windows-x64\checksums.txt" -Encoding ASCII
+          }
+
+      - name: Upload Windows x64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist\windows-x64\*
+          retention-days: 7
+
+  create-summary:
+    name: Create Build Summary
+    needs: [build-macos-x64, build-windows-x64]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List all artifacts
+        run: |
+          echo "📦 All build artifacts:"
+          find artifacts -type f -ls
+
+      - name: Create summary
+        run: |
+          cat << 'EOF' > summary.md
+          # 🎉 Build Complete!
+
+          ## macOS x64 (Intel)
+          - Location: `artifacts/macos-x64/`
+          - Files: DMG installer, App bundle (zip)
+
+          ## Windows x64
+          - Location: `artifacts/windows-x64/`
+          - Files: MSI installer, Setup.exe, Standalone exe
+
+          ## Download Instructions
+          1. Go to the "Actions" tab in GitHub
+          2. Click on this workflow run
+          3. Scroll down to "Artifacts" section
+          4. Download the artifacts you need
+
+          ## Checksums
+          Check `checksums.txt` in each artifact for file integrity verification.
+          EOF
+
+          cat summary.md
+          cat summary.md >> $GITHUB_STEP_SUMMARY
