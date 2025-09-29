@@ -77,8 +77,8 @@
     "externalBin": [],
     "copyright": "© 2025 Asterisk. All rights reserved.",
     "category": "DeveloperTool",
-    "shortDescription": "GUI app and Toolkit for Claude Code",
-    "longDescription": "opcode is a comprehensive GUI application and toolkit for working with Claude Code, providing an intuitive interface for AI-assisted development.",
+    "shortDescription": "Claude Code 图形界面应用和工具包",
+    "longDescription": "opcode 是一个用于 Claude Code 的综合图形界面应用程序和工具包，为 AI 辅助开发提供直观的界面。",
     "linux": {
       "appimage": {
         "bundleMediaFramework": true

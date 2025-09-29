@@ -1,7 +1,7 @@
 [package]
 name = "opcode"
 version = "0.2.1"
-description = "GUI app and Toolkit for Claude Code"
+description = "Claude Code 图形界面应用和工具包"
 authors = ["mufeedvh", "123vviekr"]
 license = "AGPL-3.0"
 edition = "2021"

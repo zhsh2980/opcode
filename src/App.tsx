@@ -157,7 +157,7 @@ function AppContent() {
       setProjects(projectList);
     } catch (err) {
       console.error("Failed to load projects:", err);
-      setError("Failed to load projects. Please ensure ~/.claude directory exists.");
+      setError("加载项目失败。请确保 ~/.claude 目录存在。");
     } finally {
       setLoading(false);
     }
@@ -175,7 +175,7 @@ function AppContent() {
       setSelectedProject(project);
     } catch (err) {
       console.error("Failed to load sessions:", err);
-      setError("Failed to load sessions for this project.");
+      setError("加载此项目的会话失败。");
     } finally {
       setLoading(false);
     }
@@ -241,7 +241,7 @@ function AppContent() {
               >
                 <h1 className="text-4xl font-bold tracking-tight">
                   <span className="rotating-symbol"></span>
-                  Welcome to opcode
+                  欢迎使用 opcode
                 </h1>
               </motion.div>
 
@@ -259,7 +259,7 @@ function AppContent() {
                   >
                     <div className="h-full flex flex-col items-center justify-center p-8">
                       <Bot className="h-16 w-16 mb-4 text-primary" />
-                      <h2 className="text-xl font-semibold">CC Agents</h2>
+                      <h2 className="text-xl font-semibold">CC 智能体</h2>
                     </div>
                   </Card>
                 </motion.div>
@@ -276,7 +276,7 @@ function AppContent() {
                   >
                     <div className="h-full flex flex-col items-center justify-center p-8">
                       <FolderCode className="h-16 w-16 mb-4 text-primary" />
-                      <h2 className="text-xl font-semibold">Projects</h2>
+                      <h2 className="text-xl font-semibold">项目</h2>
                     </div>
                   </Card>
                 </motion.div>
@@ -407,7 +407,7 @@ function AppContent() {
         open={showClaudeBinaryDialog}
         onOpenChange={setShowClaudeBinaryDialog}
         onSuccess={() => {
-          setToast({ message: "Claude binary path saved successfully", type: "success" });
+          setToast({ message: "Claude 二进制文件路径保存成功", type: "success" });
           // Trigger a refresh of the Claude version check
           window.location.reload();
         }}
@@ -430,7 +430,7 @@ function AppContent() {
                     await handleProjectClick(project);
                   } catch (err) {
                     console.error('Failed to create project:', err);
-                    setError('Failed to create project for the selected directory.');
+                    setError('为所选目录创建项目失败。');
                   }
                 }
               }}
@@ -468,7 +468,7 @@ function AppContent() {
                     await handleProjectClick(project);
                   } catch (err) {
                     console.error('Failed to create project:', err);
-                    setError('Failed to create project for the selected directory.');
+                    setError('为所选目录创建项目失败。');
                   }
                 }
               }}

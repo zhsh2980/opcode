@@ -237,7 +237,7 @@ export const Settings: React.FC<SettingsProps> = ({
         setProxySettingsChanged(false);
       }
 
-      setToast({ message: "Settings saved successfully!", type: "success" });
+      setToast({ message: "设置保存成功！", type: "success" });
     } catch (err) {
       console.error("Failed to save settings:", err);
       setError("Failed to save settings.");
@@ -339,9 +339,9 @@ export const Settings: React.FC<SettingsProps> = ({
         <div className="p-6">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-heading-1">Settings</h1>
+              <h1 className="text-heading-1">设置</h1>
               <p className="mt-1 text-body-small text-muted-foreground">
-                Configure Claude Code preferences
+                配置 Claude Code 偏好设置
               </p>
             </div>
             <motion.div
@@ -356,12 +356,12 @@ export const Settings: React.FC<SettingsProps> = ({
                 {saving ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Saving...
+                    正在保存...
                   </>
                 ) : (
                   <>
                     <Save className="mr-2 h-4 w-4" />
-                    Save Settings
+                    保存设置
                   </>
                 )}
               </Button>
@@ -394,29 +394,29 @@ export const Settings: React.FC<SettingsProps> = ({
         <div className="flex-1 overflow-y-auto p-6">
           <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
             <TabsList className="grid grid-cols-8 w-full mb-6 h-auto p-1">
-              <TabsTrigger value="general" className="py-2.5 px-3">General</TabsTrigger>
-              <TabsTrigger value="permissions" className="py-2.5 px-3">Permissions</TabsTrigger>
-              <TabsTrigger value="environment" className="py-2.5 px-3">Environment</TabsTrigger>
-              <TabsTrigger value="advanced" className="py-2.5 px-3">Advanced</TabsTrigger>
-              <TabsTrigger value="hooks" className="py-2.5 px-3">Hooks</TabsTrigger>
-              <TabsTrigger value="commands" className="py-2.5 px-3">Commands</TabsTrigger>
-              <TabsTrigger value="storage" className="py-2.5 px-3">Storage</TabsTrigger>
-              <TabsTrigger value="proxy" className="py-2.5 px-3">Proxy</TabsTrigger>
+              <TabsTrigger value="general" className="py-2.5 px-3">常规</TabsTrigger>
+              <TabsTrigger value="permissions" className="py-2.5 px-3">权限</TabsTrigger>
+              <TabsTrigger value="environment" className="py-2.5 px-3">环境</TabsTrigger>
+              <TabsTrigger value="advanced" className="py-2.5 px-3">高级</TabsTrigger>
+              <TabsTrigger value="hooks" className="py-2.5 px-3">钩子</TabsTrigger>
+              <TabsTrigger value="commands" className="py-2.5 px-3">命令</TabsTrigger>
+              <TabsTrigger value="storage" className="py-2.5 px-3">存储</TabsTrigger>
+              <TabsTrigger value="proxy" className="py-2.5 px-3">代理</TabsTrigger>
             </TabsList>
             
             {/* General Settings */}
             <TabsContent value="general" className="space-y-6 mt-6">
               <Card className="p-6 space-y-6">
                 <div>
-                  <h3 className="text-heading-4 mb-4">General Settings</h3>
+                  <h3 className="text-heading-4 mb-4">常规设置</h3>
                   
                   <div className="space-y-4">
                     {/* Theme Selector */}
                     <div className="flex items-center justify-between">
                       <div>
-                        <Label>Theme</Label>
+                        <Label>主题</Label>
                         <p className="text-caption text-muted-foreground mt-1">
-                          Choose your preferred color theme
+                          选择您偏好的颜色主题
                         </p>
                       </div>
                       <div className="flex items-center gap-1 p-1 bg-muted/30 rounded-lg">
@@ -430,7 +430,7 @@ export const Settings: React.FC<SettingsProps> = ({
                           )}
                         >
                           {theme === 'dark' && <Check className="h-3 w-3" />}
-                          Dark
+                          深色
                         </button>
                         <button
                           onClick={() => setTheme('gray')}
@@ -442,7 +442,7 @@ export const Settings: React.FC<SettingsProps> = ({
                           )}
                         >
                           {theme === 'gray' && <Check className="h-3 w-3" />}
-                          Gray
+                          灰色
                         </button>
                         <button
                           onClick={() => setTheme('light')}
@@ -454,7 +454,7 @@ export const Settings: React.FC<SettingsProps> = ({
                           )}
                         >
                           {theme === 'light' && <Check className="h-3 w-3" />}
-                          Light
+                          浅色
                         </button>
                         <button
                           onClick={() => setTheme('custom')}
@@ -466,7 +466,7 @@ export const Settings: React.FC<SettingsProps> = ({
                           )}
                         >
                           {theme === 'custom' && <Check className="h-3 w-3" />}
-                          Custom
+                          自定义
                         </button>
                       </div>
                     </div>
@@ -474,7 +474,7 @@ export const Settings: React.FC<SettingsProps> = ({
                     {/* Custom Color Editor */}
                     {theme === 'custom' && (
                       <div className="space-y-4 p-4 border rounded-lg bg-muted/20">
-                        <h4 className="text-label">Custom Theme Colors</h4>
+                        <h4 className="text-label">自定义主题颜色</h4>
                         
                         <div className="grid grid-cols-2 gap-4">
                           {/* Background Color */}
@@ -601,9 +601,9 @@ export const Settings: React.FC<SettingsProps> = ({
                     {/* Include Co-authored By */}
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5 flex-1">
-                        <Label htmlFor="coauthored">Include "Co-authored by Claude"</Label>
+                        <Label htmlFor="coauthored">包含 "由 Claude 共同创作"</Label>
                         <p className="text-caption text-muted-foreground">
-                          Add Claude attribution to git commits and pull requests
+                          在 git 提交和拉取请求中添加 Claude 归属
                         </p>
                       </div>
                       <Switch
@@ -616,9 +616,9 @@ export const Settings: React.FC<SettingsProps> = ({
                     {/* Verbose Output */}
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5 flex-1">
-                        <Label htmlFor="verbose">Verbose Output</Label>
+                        <Label htmlFor="verbose">详细输出</Label>
                         <p className="text-caption text-muted-foreground">
-                          Show full bash and command outputs
+                          显示完整的 bash 和命令输出
                         </p>
                       </div>
                       <Switch
@@ -632,7 +632,7 @@ export const Settings: React.FC<SettingsProps> = ({
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
                         <div className="flex-1">
-                          <Label htmlFor="cleanup">Chat Transcript Retention (days)</Label>
+                          <Label htmlFor="cleanup">聊天记录保留（天数）</Label>
                           <p className="text-caption text-muted-foreground mt-1">
                             How long to retain chat transcripts locally (default: 30 days)
                           </p>
@@ -675,7 +675,7 @@ export const Settings: React.FC<SettingsProps> = ({
                       <div className="space-y-1">
                         <Label htmlFor="analytics-enabled">Enable Analytics</Label>
                         <p className="text-caption text-muted-foreground">
-                          Help improve opcode by sharing anonymous usage data
+                          通过分享匿名使用数据帮助改进 opcode
                         </p>
                       </div>
                       <Switch
@@ -717,7 +717,7 @@ export const Settings: React.FC<SettingsProps> = ({
                     {/* Tab Persistence Toggle */}
                     <div className="flex items-center justify-between">
                       <div className="space-y-1">
-                        <Label htmlFor="tab-persistence">Remember Open Tabs</Label>
+                        <Label htmlFor="tab-persistence">记住已打开的标签页</Label>
                         <p className="text-caption text-muted-foreground">
                           Restore your tabs when you restart the app
                         </p>
@@ -742,7 +742,7 @@ export const Settings: React.FC<SettingsProps> = ({
                     {/* Startup Intro Toggle */}
                     <div className="flex items-center justify-between">
                       <div className="space-y-1">
-                        <Label htmlFor="startup-intro">Show Welcome Intro on Startup</Label>
+                        <Label htmlFor="startup-intro">启动时显示欢迎介绍</Label>
                         <p className="text-caption text-muted-foreground">
                           Display a brief welcome animation when the app launches
                         </p>
@@ -901,9 +901,9 @@ export const Settings: React.FC<SettingsProps> = ({
                 <div className="space-y-6">
                   <div className="flex items-center justify-between">
                     <div>
-                      <h3 className="text-heading-4">Environment Variables</h3>
+                      <h3 className="text-heading-4">环境变量</h3>
                       <p className="text-sm text-muted-foreground mt-1">
-                        Environment variables applied to every Claude Code session
+                        应用于每个 Claude Code 会话的环境变量
                       </p>
                     </div>
                     <Button
@@ -974,7 +974,7 @@ export const Settings: React.FC<SettingsProps> = ({
               <Card className="p-6">
                 <div className="space-y-6">
                   <div>
-                    <h3 className="text-base font-semibold mb-4">Advanced Settings</h3>
+                    <h3 className="text-base font-semibold mb-4">高级设置</h3>
                     <p className="text-sm text-muted-foreground mb-6">
                       Additional configuration options for advanced users
                     </p>
@@ -990,13 +990,13 @@ export const Settings: React.FC<SettingsProps> = ({
                       onChange={(e) => updateSetting("apiKeyHelper", e.target.value || undefined)}
                     />
                     <p className="text-xs text-muted-foreground">
-                      Custom script to generate auth values for API requests
+                      用于为 API 请求生成认证值的自定义脚本
                     </p>
                   </div>
                   
                   {/* Raw JSON Editor */}
                   <div className="space-y-2">
-                    <Label>Raw Settings (JSON)</Label>
+                    <Label>原始设置 (JSON)</Label>
                     <div className="p-3 rounded-md bg-muted font-mono text-xs overflow-x-auto whitespace-pre-wrap">
                       <pre>{JSON.stringify(settings, null, 2)}</pre>
                     </div>
@@ -1013,7 +1013,7 @@ export const Settings: React.FC<SettingsProps> = ({
               <Card className="p-6">
                 <div className="space-y-4">
                   <div>
-                    <h3 className="text-base font-semibold mb-2">User Hooks</h3>
+                    <h3 className="text-base font-semibold mb-2">用户钩子</h3>
                     <p className="text-body-small text-muted-foreground mb-4">
                       Configure hooks that apply to all Claude Code sessions for your user account.
                       These are stored in <code className="mx-1 px-2 py-1 bg-muted rounded text-xs">~/.claude/settings.json</code>
